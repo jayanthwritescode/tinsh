@@ -87,21 +87,19 @@ make
 **Requirements**: clang compiler and Unix system (tested on macOS)  
 **Memory safety**: Verified leak-free under AddressSanitizer (`clang -fsanitize=address`)
 
-## Technical Implementation
+## Under the hood
 
-The core insight from building tinsh is that Unix shells are fundamentally about process choreography and file descriptor manipulation. Every command you type becomes a dance of `fork()`, `exec()`, `pipe()`, and `dup2()` working together.
+The most surprising discovery was that `fork()` and `exec()` aren't just implementation details - they're the foundation that makes Unix work. When you call `fork()`, you get an exact copy of your process with the same file descriptors, memory mappings, and signal handlers. Then `exec()` replaces the program in that child process while preserving all those file descriptors. This two-step dance is what lets you redirect input/output before the new program even starts - you modify the child's file descriptors, then `exec()` the new program, and it inherits those modifications seamlessly.
 
-**Process Creation**: When you type `ls`, tinsh calls `fork()` to create a child process that's an exact copy of the shell. The parent continues waiting for more input while the child transforms itself into `ls` via `execvp()`. This separation is crucial - it lets the shell manage child processes while staying responsive.
+Pipes work because file descriptors are just integers referring to entries in a per-process table. When you call `pipe()`, the kernel creates two file descriptors that refer to the same underlying pipe object - one for reading, one for writing. The magic happens with `dup2()`, which can copy one file descriptor over another. So you close stdout (file descriptor 1) and duplicate the pipe's write-end over it. Now when the child process writes to stdout, it's actually writing into the pipe. The parent process reads from the read-end, and you've connected two programs without any temporary files.
 
-**File Descriptors**: Unix treats everything as a file, including your terminal. When you redirect with `> file`, `dup2()` copies the file's descriptor over stdout (descriptor 1). After this, anything the child writes to stdout actually goes to the file. The same principle makes pipes work - `pipe()` creates two descriptors, and connecting one command's stdout to another's stdin is just clever descriptor manipulation.
+The `cd` command has to be built-in because processes can't change each other's working directories. When the shell forks a child process to run `ls`, that child gets a copy of the shell's current directory. If `ls` could change directories, it would only affect itself, not the shell. The shell itself has to call `chdir()` to change its own working directory, which is why `cd` runs in the parent process rather than a child.
 
-**Signal Boundaries**: Ctrl+C sends SIGINT to all processes in the foreground process group. tinsh uses `sigaction()` to catch this signal and forward it only to the child process group. The shell ignores the signal itself, which is why Ctrl+C kills your command but keeps the shell running.
+## What I discovered
 
-**Terminal Interaction**: Arrow keys and tab completion require switching from "cooked" mode (where the terminal handles line editing locally) to "raw" mode (where each keystroke is read individually). Arrow keys send escape sequences like `\x1b[A`, so the shell reads multiple bytes to recognize a single keypress.
+Building this shell wasn't about implementing features - it was about understanding why Unix works the way it does. The elegance isn't in having more functions, it's in how a few simple concepts combine to create something powerful. File descriptors as universal handles, process groups as isolation boundaries, signals as communication channels - these fit together perfectly.
 
-**Command Substitution**: This is essentially a reverse pipe. Instead of the parent writing to a child's stdin, the child writes to its stdout which the parent captures through a pipe. The implementation redirects the child's stdout to a pipe before execution, then reads the results back into the parent process for substitution.
-
-**Memory Management**: Every `malloc()` has a corresponding `free()`, and the shell has been verified memory-leak free using AddressSanitizer. The code uses defensive programming practices to prevent buffer overflows and null pointer dereferences.
+The hardest part wasn't the code, it was unlearning assumptions about how things "should" work and seeing how they actually do work.
 
 ## Known Limitations
 
