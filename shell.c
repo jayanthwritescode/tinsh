@@ -6,6 +6,9 @@ int next_job_id = 1;
 char history[MAX_HISTORY][MAX_INPUT_LEN];
 int history_count = 0;
 volatile sig_atomic_t foreground_pid = 0;
+int last_exit_code = 0;
+struct termios orig_termios;
+int history_position = -1;
 
 /* Initialize shell state */
 void initialize_shell(void) {
@@ -21,6 +24,9 @@ void initialize_shell(void) {
     for (int i = 0; i < MAX_HISTORY; i++) {
         history[i][0] = '\0';
     }
+    
+    /* Save original terminal settings */
+    tcgetattr(STDIN_FILENO, &orig_termios);
     
     /* Setup signal handlers */
     setup_signal_handlers();
@@ -59,7 +65,7 @@ void shell_loop(void) {
         add_to_history(input);
         
         /* Parse input into commands */
-        parse_input(input, commands, &num_commands);
+        parse_input_advanced(input, commands, &num_commands);
         
         /* Skip if no commands found */
         if (num_commands == 0) {
@@ -96,32 +102,17 @@ void shell_loop(void) {
     }
 }
 
-/* Read input from user */
-char *read_input(void) {
-    char *input = malloc(MAX_INPUT_LEN);
-    if (input == NULL) {
-        print_error("malloc", "failed to allocate memory");
-        exit(1);
-    }
-    
-    /* Read line using fgets - safer than gets */
-    if (fgets(input, MAX_INPUT_LEN, stdin) == NULL) {
-        free(input);
-        return NULL;  /* EOF */
-    }
-    
-    /* Remove trailing newline */
-    input[strcspn(input, "\n")] = '\0';
-    
-    return input;
-}
+/* Read input from user - replaced by enhanced version below */
 
-/* Parse input string into command structures */
-void parse_input(char *input, command_t *commands, int *num_commands) {
+/* Parse input string into command structures with quote and escape handling */
+void parse_input_advanced(char *input, command_t *commands, int *num_commands) {
     *num_commands = 0;
-    char *token;
-    char *rest = input;
-    int arg_index = 0;
+    char current_arg[MAX_INPUT_LEN];
+    int arg_pos = 0;
+    bool in_quotes = false;
+    bool in_single_quotes = false;
+    bool escape_next = false;
+    int cmd_arg_index = 0;
     
     /* Initialize first command */
     commands[0].argc = 0;
@@ -138,55 +129,101 @@ void parse_input(char *input, command_t *commands, int *num_commands) {
         *ampersand = '\0';  /* Remove & from input */
     }
     
-    /* Tokenize input */
-    while ((token = strtok_r(rest, " \t", &rest)) != NULL) {
-        /* Handle I/O redirection */
-        if (strcmp(token, "<") == 0) {
-            /* Input redirection */
-            token = strtok_r(rest, " \t", &rest);
-            if (token != NULL) {
-                commands[*num_commands].input_file = strdup(token);
+    for (int i = 0; input[i] != '\0'; i++) {
+        char c = input[i];
+        
+        if (escape_next) {
+            /* Add escaped character to current argument */
+            if (arg_pos < MAX_INPUT_LEN - 1) {
+                current_arg[arg_pos++] = c;
             }
-        } else if (strcmp(token, ">") == 0) {
-            /* Output redirection (truncate) */
-            token = strtok_r(rest, " \t", &rest);
-            if (token != NULL) {
-                commands[*num_commands].output_file = strdup(token);
+            escape_next = false;
+        } else if (c == '\\') {
+            /* Next character is escaped */
+            escape_next = true;
+        } else if (c == '"' && !in_single_quotes) {
+            /* Toggle double quotes */
+            in_quotes = !in_quotes;
+        } else if (c == '\'' && !in_quotes) {
+            /* Toggle single quotes */
+            in_single_quotes = !in_single_quotes;
+        } else if ((c == ' ' || c == '\t') && !in_quotes && !in_single_quotes) {
+            /* End of argument */
+            if (arg_pos > 0) {
+                current_arg[arg_pos] = '\0';
+                
+                /* Handle I/O redirection */
+                if (strcmp(current_arg, "<") == 0) {
+                    /* Input redirection */
+                    i++;
+                    while (input[i] == ' ' || input[i] == '\t') i++;
+                    if (input[i] != '\0') {
+                        commands[*num_commands].input_file = strdup(&input[i]);
+                        while (input[i] != '\0' && input[i] != ' ' && input[i] != '\t') i++;
+                        i--;
+                    }
+                } else if (strcmp(current_arg, ">") == 0) {
+                    /* Output redirection (truncate) */
+                    i++;
+                    while (input[i] == ' ' || input[i] == '\t') i++;
+                    if (input[i] != '\0') {
+                        commands[*num_commands].output_file = strdup(&input[i]);
+                        while (input[i] != '\0' && input[i] != ' ' && input[i] != '\t') i++;
+                        i--;
+                    }
+                } else if (strcmp(current_arg, ">>") == 0) {
+                    /* Output redirection (append) */
+                    i++;
+                    while (input[i] == ' ' || input[i] == '\t') i++;
+                    if (input[i] != '\0') {
+                        commands[*num_commands].append_file = strdup(&input[i]);
+                        while (input[i] != '\0' && input[i] != ' ' && input[i] != '\t') i++;
+                        i--;
+                    }
+                } else if (strcmp(current_arg, "|") == 0) {
+                    /* Pipe to next command */
+                    commands[*num_commands].pipe_next = true;
+                    commands[*num_commands].args[cmd_arg_index] = NULL;
+                    
+                    /* Initialize next command */
+                    (*num_commands)++;
+                    commands[*num_commands].argc = 0;
+                    commands[*num_commands].input_file = NULL;
+                    commands[*num_commands].output_file = NULL;
+                    commands[*num_commands].append_file = NULL;
+                    commands[*num_commands].background = false;
+                    commands[*num_commands].pipe_next = false;
+                    cmd_arg_index = 0;
+                } else {
+                    /* Regular argument */
+                    commands[*num_commands].args[cmd_arg_index++] = strdup(current_arg);
+                    commands[*num_commands].argc++;
+                    
+                    if (cmd_arg_index >= MAX_ARGS - 1) {
+                        print_error("parse", "too many arguments");
+                        break;
+                    }
+                }
+                
+                arg_pos = 0;
             }
-        } else if (strcmp(token, ">>") == 0) {
-            /* Output redirection (append) */
-            token = strtok_r(rest, " \t", &rest);
-            if (token != NULL) {
-                commands[*num_commands].append_file = strdup(token);
-            }
-        } else if (strcmp(token, "|") == 0) {
-            /* Pipe to next command */
-            commands[*num_commands].pipe_next = true;
-            commands[*num_commands].args[arg_index] = NULL;
-            
-            /* Initialize next command */
-            (*num_commands)++;
-            commands[*num_commands].argc = 0;
-            commands[*num_commands].input_file = NULL;
-            commands[*num_commands].output_file = NULL;
-            commands[*num_commands].append_file = NULL;
-            commands[*num_commands].background = false;
-            commands[*num_commands].pipe_next = false;
-            arg_index = 0;
         } else {
-            /* Regular argument */
-            commands[*num_commands].args[arg_index++] = strdup(token);
-            commands[*num_commands].argc++;
-            
-            if (arg_index >= MAX_ARGS - 1) {
-                print_error("parse", "too many arguments");
-                break;
+            /* Add character to current argument */
+            if (arg_pos < MAX_INPUT_LEN - 1) {
+                current_arg[arg_pos++] = c;
             }
         }
     }
     
+    /* Handle last argument */
+    if (arg_pos > 0) {
+        current_arg[arg_pos] = '\0';
+        commands[*num_commands].args[cmd_arg_index++] = strdup(current_arg);
+        commands[*num_commands].argc++;
+    }
+    
     /* Null-terminate last command's args */
-    commands[*num_commands].args[arg_index] = NULL;
+    commands[*num_commands].args[cmd_arg_index] = NULL;
     (*num_commands)++;
 }
 
@@ -231,11 +268,21 @@ void execute_command(command_t *cmd) {
         if (cmd->background) {
             /* Add to job table and don't wait */
             add_job(pid, cmd->args[0]);
+            last_exit_code = 0;  /* Background jobs start successfully */
         } else {
             /* Wait for foreground command to complete */
             int status;
             waitpid(pid, &status, 0);
             foreground_pid = 0;
+            
+            /* Track exit code */
+            if (WIFEXITED(status)) {
+                last_exit_code = WEXITSTATUS(status);
+            } else if (WIFSIGNALED(status)) {
+                last_exit_code = 128 + WTERMSIG(status);
+            } else {
+                last_exit_code = 1;
+            }
         }
     }
 }
@@ -302,10 +349,24 @@ void execute_pipeline(command_t *commands, int num_commands) {
     }
     
     /* Wait for all processes to complete */
+    int pipeline_status = 0;
     for (int i = 0; i < num_commands; i++) {
         int status;
         waitpid(pids[i], &status, 0);
+        
+        /* Use the last command's exit status for the pipeline */
+        if (i == num_commands - 1) {
+            if (WIFEXITED(status)) {
+                pipeline_status = WEXITSTATUS(status);
+            } else if (WIFSIGNALED(status)) {
+                pipeline_status = 128 + WTERMSIG(status);
+            } else {
+                pipeline_status = 1;
+            }
+        }
     }
+    
+    last_exit_code = pipeline_status;
 }
 
 /* Handle I/O redirection for a command */
@@ -344,22 +405,29 @@ void redirect_io(command_t *cmd) {
     }
 }
 
-/* Print shell prompt with current directory */
+/* Print shell prompt with current directory and exit status */
 void print_prompt(void) {
     char cwd[MAX_PATH_LEN];
     char *abbrev_path;
     
     /* Get current working directory */
     if (getcwd(cwd, MAX_PATH_LEN) == NULL) {
-        printf("[tinsh unknown]$ ");
+        printf("\033[2m[tinsh\033[0m \033[1munknown\033[0m\033[2m]\033[0m$ ");
         return;
     }
     
     /* Abbreviate home directory as ~ */
     abbrev_path = abbreviate_path(cwd);
     
-    /* Print prompt with ANSI colors */
-    printf("\033[2m[tinsh\033[0m \033[1m%s\033[0m\033[2m]\033[0m$ ", abbrev_path);
+    /* Print prompt with ANSI colors - $ color depends on last exit code */
+    printf("\033[2m[tinsh\033[0m \033[1m%s\033[0m\033[2m]\033[0m", abbrev_path);
+    
+    if (last_exit_code == 0) {
+        printf("%s$%s ", COLOR_WHITE, COLOR_RESET);
+    } else {
+        printf("%s$%s ", COLOR_RED, COLOR_RESET);
+    }
+    
     fflush(stdout);
     
     free(abbrev_path);
@@ -387,8 +455,121 @@ void print_error(const char *command, const char *reason) {
 
 /* Cleanup and exit */
 void cleanup_and_exit(int exit_code) {
+    restore_terminal();
     printf("goodbye.\n");
     exit(exit_code);
+}
+
+/* Terminal handling functions */
+
+/* Set terminal to raw mode for character-by-character input */
+void set_raw_mode(void) {
+    struct termios raw = orig_termios;
+    
+    /* Disable various features */
+    raw.c_lflag &= ~(ECHO | ICANON | ISIG);
+    raw.c_iflag &= ~(IXON);
+    raw.c_cc[VMIN] = 1;   /* Read one character at a time */
+    raw.c_cc[VTIME] = 0;  /* No timeout */
+    
+    tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
+}
+
+/* Restore original terminal settings */
+void restore_terminal(void) {
+    tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);
+}
+
+/* Handle backspace in raw mode */
+void handle_backspace(void) {
+    printf("\b \b");  /* Backspace, space, backspace */
+    fflush(stdout);
+}
+
+/* Clear current line */
+void clear_line(void) {
+    printf("\r\033[K");  /* Carriage return and clear to end of line */
+    fflush(stdout);
+}
+
+/* Enhanced read_input with arrow keys and tab completion */
+char *read_input(void) {
+    char input[MAX_INPUT_LEN] = {0};
+    int pos = 0;
+    int history_index = -1;
+    
+    set_raw_mode();
+    
+    while (1) {
+        int c = getchar();
+        
+        if (c == EOF) {
+            restore_terminal();
+            printf("\n");
+            return NULL;
+        }
+        
+        if (c == ENTER) {
+            printf("\n");
+            restore_terminal();
+            return strdup(input);
+        }
+        
+        if (c == BACKSPACE) {
+            if (pos > 0) {
+                input[--pos] = '\0';
+                handle_backspace();
+            }
+            continue;
+        }
+        
+        if (c == ESCAPE) {
+            /* Check for arrow keys */
+            if (getchar() == '[') {
+                int arrow = getchar();
+                
+                if (arrow == 'A') {  /* Up arrow */
+                    if (history_count > 0 && history_index < history_count - 1) {
+                        history_index++;
+                        clear_line();
+                        strcpy(input, history[history_count - 1 - history_index]);
+                        pos = strlen(input);
+                        printf("%s", input);
+                        fflush(stdout);
+                    }
+                } else if (arrow == 'B') {  /* Down arrow */
+                    if (history_index > 0) {
+                        history_index--;
+                        clear_line();
+                        strcpy(input, history[history_count - 1 - history_index]);
+                        pos = strlen(input);
+                        printf("%s", input);
+                        fflush(stdout);
+                    } else if (history_index == 0) {
+                        history_index--;
+                        clear_line();
+                        input[0] = '\0';
+                        pos = 0;
+                        fflush(stdout);
+                    }
+                }
+            }
+            continue;
+        }
+        
+        if (c == TAB) {
+            handle_tab_completion(input, &pos);
+            continue;
+        }
+        
+        /* Regular printable character */
+        if (c >= 32 && c < 127 && pos < MAX_INPUT_LEN - 1) {
+            input[pos++] = c;
+            input[pos] = '\0';
+            printf("%c", c);
+            fflush(stdout);
+        }
+    }
 }
 
 /* Built-in command implementations */
@@ -402,6 +583,7 @@ int builtin_cd(char **args) {
         target_dir = getenv("HOME");
         if (target_dir == NULL) {
             print_error("cd", "HOME not set");
+            last_exit_code = 1;
             return 1;
         }
     } else {
@@ -411,9 +593,11 @@ int builtin_cd(char **args) {
     /* Change directory - must run in parent process */
     if (chdir(target_dir) == -1) {
         print_error("cd", strerror(errno));
+        last_exit_code = 1;
         return 1;
     }
     
+    last_exit_code = 0;
     return 0;
 }
 
@@ -435,10 +619,12 @@ int builtin_pwd(char **args __attribute__((unused))) {
     
     if (getcwd(cwd, MAX_PATH_LEN) == NULL) {
         print_error("pwd", strerror(errno));
+        last_exit_code = 1;
         return 1;
     }
     
     printf("%s\n", cwd);
+    last_exit_code = 0;
     return 0;
 }
 
@@ -447,6 +633,7 @@ int builtin_history(char **args __attribute__((unused))) {
     for (int i = 0; i < history_count; i++) {
         printf("%d %s\n", i + 1, history[i]);
     }
+    last_exit_code = 0;
     return 0;
 }
 
@@ -465,6 +652,7 @@ int builtin_jobs(char **args __attribute__((unused))) {
         printf("No background jobs.\n");
     }
     
+    last_exit_code = 0;
     return 0;
 }
 
@@ -573,8 +761,14 @@ void handle_sigint(int sig __attribute__((unused))) {
         /* Kill foreground process */
         kill(foreground_pid, SIGINT);
         foreground_pid = 0;
+    } else {
+        /* No foreground process - restore terminal and show new prompt */
+        restore_terminal();
+        printf("^C\n");
+        print_prompt();
+        fflush(stdout);
+        set_raw_mode();
     }
-    /* Don't kill the shell itself */
 }
 
 /* Handle SIGTSTP (Ctrl+Z) */
@@ -594,5 +788,114 @@ void handle_sigchld(int sig __attribute__((unused))) {
     int status;
     while (waitpid(-1, &status, WNOHANG) > 0) {
         /* Reap zombie processes */
+    }
+}
+
+/* Tab completion functions */
+
+/* Complete commands from PATH */
+char **complete_command(const char *token, int *num_matches) {
+    static char *matches[MAX_COMPLETIONS];
+    char *path_copy = strdup(getenv("PATH"));
+    char *dir = strtok(path_copy, ":");
+    *num_matches = 0;
+    
+    while (dir != NULL && *num_matches < MAX_COMPLETIONS - 1) {
+        DIR *d = opendir(dir);
+        if (d != NULL) {
+            struct dirent *entry;
+            while ((entry = readdir(d)) != NULL && *num_matches < MAX_COMPLETIONS - 1) {
+                if (strncmp(entry->d_name, token, strlen(token)) == 0) {
+                    /* Check if it's executable */
+                    char full_path[MAX_PATH_LEN];
+                    snprintf(full_path, MAX_PATH_LEN, "%s/%s", dir, entry->d_name);
+                    if (access(full_path, X_OK) == 0) {
+                        matches[*num_matches] = strdup(entry->d_name);
+                        (*num_matches)++;
+                    }
+                }
+            }
+            closedir(d);
+        }
+        dir = strtok(NULL, ":");
+    }
+    
+    matches[*num_matches] = NULL;
+    free(path_copy);
+    return matches;
+}
+
+/* Complete files in current directory */
+char **complete_files(const char *token, int *num_matches) {
+    static char *matches[MAX_COMPLETIONS];
+    DIR *d = opendir(".");
+    *num_matches = 0;
+    
+    if (d != NULL) {
+        struct dirent *entry;
+        while ((entry = readdir(d)) != NULL && *num_matches < MAX_COMPLETIONS - 1) {
+            if (strncmp(entry->d_name, token, strlen(token)) == 0) {
+                matches[*num_matches] = strdup(entry->d_name);
+                (*num_matches)++;
+            }
+        }
+        closedir(d);
+    }
+    
+    matches[*num_matches] = NULL;
+    return matches;
+}
+
+/* Handle tab completion */
+void handle_tab_completion(char *input, int *cursor_pos) {
+    /* Find the current token to complete */
+    int token_start = *cursor_pos;
+    while (token_start > 0 && input[token_start - 1] != ' ' && input[token_start - 1] != '\t') {
+        token_start--;
+    }
+    
+    char token[MAX_INPUT_LEN];
+    strncpy(token, &input[token_start], *cursor_pos - token_start);
+    token[*cursor_pos - token_start] = '\0';
+    
+    /* Try command completion first (if at start of line) */
+    char **matches;
+    int num_matches;
+    
+    if (token_start == 0) {
+        matches = complete_command(token, &num_matches);
+    } else {
+        matches = complete_files(token, &num_matches);
+    }
+    
+    if (num_matches == 0) {
+        /* No matches - do nothing */
+        return;
+    } else if (num_matches == 1) {
+        /* Single match - complete it */
+        int completion_len = strlen(matches[0]) - strlen(token);
+        if (*cursor_pos + completion_len < MAX_INPUT_LEN - 1) {
+            strcat(input, matches[0] + strlen(token));
+            printf("%s", matches[0] + strlen(token));
+            *cursor_pos += completion_len;
+            fflush(stdout);
+        }
+    } else {
+        /* Multiple matches - show them */
+        printf("\n");
+        for (int i = 0; i < num_matches; i++) {
+            printf("%s  ", matches[i]);
+        }
+        printf("\n");
+        
+        /* Reprint prompt and current input */
+        print_prompt();
+        printf("%s", input);
+        fflush(stdout);
+    }
+    
+    /* Free matches */
+    for (int i = 0; i < num_matches; i++) {
+        free(matches[i]);
     }
 }

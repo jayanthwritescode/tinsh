@@ -5,11 +5,15 @@ tinsh is a minimal Unix shell implementation written in C that provides the core
 ## Features
 
 - **Basic REPL**: Clean prompt showing current working directory with tilde abbreviation
+- **Exit code visualization**: Prompt `$` is bold white for success, bold red for failure
 - **Built-in commands**: `cd`, `exit`, `pwd`, `history`, `jobs`
+- **Advanced parsing**: Full support for quoted strings (`"hello world"`, `'single quotes'`) and escaped spaces (`hello\ world`)
 - **I/O redirection**: Support for `<` (input), `>` (output), and `>>` (append)
 - **Pipes**: Chain multiple commands with `|` operator
 - **Signal handling**: Proper handling of Ctrl+C and Ctrl+Z without killing the shell
 - **Background jobs**: Run commands with `&` and track them with the `jobs` command
+- **Arrow key navigation**: Up/down arrows cycle through command history
+- **Tab completion**: Complete commands from PATH and local filenames
 
 ### Usage Examples
 
@@ -23,6 +27,11 @@ cd /tmp
 history
 jobs
 
+# Quoted strings and escaped spaces
+echo "hello world"
+echo 'single quotes work too'
+echo hello\ world
+
 # I/O redirection
 ls > file_list.txt
 cat file_list.txt >> backup.txt
@@ -35,6 +44,9 @@ ps aux | grep tinsh
 # Background jobs
 sleep 10 &
 find / -name "*.txt" > results.txt &
+
+# Arrow key navigation (use up/down arrows to browse history)
+# Tab completion (press Tab to complete commands and files)
 ```
 
 ## Build and Run
