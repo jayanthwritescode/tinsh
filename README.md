@@ -1,126 +1,66 @@
-# tinsh - Tiny Shell
+tinsh
+a tiny shell. built to understand how shells actually work.
 
-tinsh is a minimal Unix shell implementation written in C that provides the core functionality expected from a command-line interface. It demonstrates fundamental systems programming concepts including process management, inter-process communication, and signal handling.
+## What is this?
+
+This is a Unix shell written from scratch in C, built not because bash needed a competitor but because the only way to really understand fork, exec, pipes, and signals is to implement them yourself. It started as a question: what actually happens when you type `ls -la` and press Enter?
 
 ## Features
 
-- **Basic REPL**: Clean prompt showing current working directory with tilde abbreviation
-- **Exit code visualization**: Prompt `$` is bold white for success, bold red for failure
-- **Built-in commands**: `cd`, `exit`, `pwd`, `history`, `jobs`
-- **Advanced parsing**: Full support for quoted strings (`"hello world"`, `'single quotes'`) and escaped spaces (`hello\ world`)
-- **Logical operators**: Semicolon (`;`), AND (`&&`), OR (`||`) with proper precedence
-- **I/O redirection**: Support for `<` (input), `>` (output), and `>>` (append)
-- **Pipes**: Chain multiple commands with `|` operator
-- **Signal handling**: Proper handling of Ctrl+C and Ctrl+Z without killing the shell
-- **Background jobs**: Run commands with `&` and track them with the `jobs` command
-- **Arrow key navigation**: Up/down arrows cycle through command history
-- **Tab completion**: Complete commands from PATH and local filenames
+redirect input and output (`>`, `>>`, `<`) - because everything in Unix is a file, including your terminal
 
-### Usage Examples
+pipe commands together (`cmd1 | cmd2`) - connecting stdout of one process to stdin of another using file descriptors
 
-```bash
-# Basic commands
-ls -la
-pwd
+logical operators (`;`, `&&`, `||`) - implementing short-circuit evaluation with proper precedence
 
-# Built-in commands
-cd /tmp
-history
-jobs
+command substitution (`$(cmd)` and `` `cmd` ``) - capturing stdout from a child process back into the parent
 
-# Quoted strings and escaped spaces
-echo "hello world"
-echo 'single quotes work too'
-echo hello\ world
+quoted strings and escaped spaces (`"hello world"`, `'single quotes'`, `hello\ world`) - building a proper tokenizer that respects quote state
 
-# I/O redirection
-ls > file_list.txt
-cat file_list.txt >> backup.txt
-sort < unsorted.txt
+background jobs (`cmd &`) - tracking child processes that run without blocking the prompt
 
-# Pipes
-ls -la | grep ".c" | wc -l
-ps aux | grep tinsh
+arrow key history navigation - using termios raw mode to read escape sequences from the terminal
 
-# Background jobs
-sleep 10 &
-find / -name "*.txt" > results.txt &
+tab completion - searching PATH and current directory for executable and file matches
 
-# Logical operators
-true && echo "this will print"
-false && echo "this won't print"
-false || echo "this will print"
-true || echo "this won't print"
+signal handling (Ctrl+C, Ctrl+Z) - keeping the shell alive while terminating foreground processes
 
-# Complex chains with precedence
-cmd1 && cmd2 || cmd3; cmd4
-ls /nonexistent && echo "found" || echo "not found"; pwd
-
-# Arrow key navigation (use up/down arrows to browse history)
-# Tab completion (press Tab to complete commands and files)
-```
-
-## Build and Run
-
-### Prerequisites
-
-- macOS with Xcode Command Line Tools (clang compiler)
-- Make utility
-
-### Building
+## Build and run
 
 ```bash
+git clone https://github.com/yourusername/tinsh.git
 cd tinsh
 make
-```
-
-### Running
-
-```bash
-# Run the shell
 ./tinsh
-
-# Or use the make target
-make run
 ```
 
-### Cleaning
+Requires clang and a Unix system (tested on macOS).
 
-```bash
-make clean
-```
+---
 
-## Under the Hood
+## Under the hood
 
-A Unix shell is essentially a program that creates and manages other programs. At its core, tinsh demonstrates five critical system calls that make this possible:
+The most surprising discovery was that `fork()` and `exec()` aren't just implementation details - they're the foundation that makes Unix work. When you call `fork()`, you get an exact copy of your process with the same file descriptors, memory mappings, and signal handlers. Then `exec()` replaces the program in that child process while preserving all those file descriptors. This two-step dance is what lets you redirect input/output before the new program even starts - you modify the child's file descriptors, then `exec()` the new program, and it inherits those modifications seamlessly.
 
-**fork()** is the foundation of process creation in Unix. When you type a command, tinsh calls `fork()` to create an exact copy of itself. The parent process (the shell) continues running to accept more commands, while the child process becomes the new command. Without `fork()`, we couldn't run external programs at all - every command would have to be built into the shell itself.
+Pipes work because file descriptors are just integers referring to entries in a per-process table. When you call `pipe()`, the kernel creates two file descriptors that refer to the same underlying pipe object - one for reading, one for writing. The magic happens with `dup2()`, which can copy one file descriptor over another. So you close stdout (file descriptor 1) and duplicate the pipe's write-end over it. Now when the child process writes to stdout, it's actually writing into the pipe. The parent process reads from the read-end, and you've connected two programs without any temporary files.
 
-**execvp()** transforms a process into a different program. After `fork()` creates the child process, `execvp()` replaces the shell's code in that child with the requested command's code. This is why typing `ls` doesn't give you another shell - the child process completely becomes the `ls` program. If `execvp()` fails, the child would continue running shell code, which is why we exit immediately after a failed exec.
+The `cd` command has to be built-in because processes can't change each other's working directories. When the shell forks a child process to run `ls`, that child gets a copy of the shell's current directory. If `ls` could change directories, it would only affect itself, not the shell. The shell itself has to call `chdir()` to change its own working directory, which is why `cd` runs in the parent process rather than a child.
 
-**pipe()** creates communication channels between processes. When you type `cmd1 | cmd2`, `pipe()` creates a pair of file descriptors where one writes and the other reads. The first command's stdout is connected to one end, the second's stdin to the other. Without pipes, you couldn't chain commands - you'd have to save intermediate results to temporary files.
+Signal handling revealed why pressing Ctrl+C doesn't kill your shell. Signals are sent to entire process groups, and the shell puts foreground commands in their own process group. When Ctrl+C sends SIGINT, the shell's signal handler catches it and forwards it to the child process group. The shell ignores the signal itself, so it stays alive while the foreground command terminates. This required careful setup with `sigaction()` and process group management.
 
-**dup2()** redirects file descriptors, enabling I/O redirection. When you type `cmd > file`, `dup2()` copies the file's file descriptor onto stdout's descriptor (usually 1). After this, anything written to stdout goes to the file instead. The same principle works for input redirection with stdin. Without `dup2()`, commands would be stuck with standard input/output and couldn't read from or write to files.
+Raw terminal mode was the gateway to interactive features. Normally terminals operate in "cooked" mode where they buffer lines and handle backspace, arrow keys, and control characters locally. Raw mode disables all that, letting the shell read each character as it's typed. Arrow keys send escape sequences like `\x1b[A`, so the shell has to read multiple bytes to recognize a single keypress. Tab completion works by temporarily restoring cooked mode to display completion options, then switching back to raw mode.
 
-**sigaction()** provides robust signal handling. When you press Ctrl+C, the kernel sends SIGINT to every process in the foreground process group. tinsh uses `sigaction()` to catch this signal and forward it only to the running child process, not the shell itself. This is why Ctrl+C kills your command but keeps the shell running. Without proper signal handling, Ctrl+C would terminate the entire shell session.
+Command substitution is essentially a reverse pipe. Instead of the parent writing to a child's stdin, the child writes to its stdout which the parent reads through a pipe. The tricky part is that the child's stdout is also connected to the terminal, so you have to carefully manage file descriptors to capture the output without breaking the terminal connection. The solution is to redirect the child's stdout to the pipe before executing the command, then read the pipe contents back into the parent process.
 
-These system calls work together: `fork()` creates the process, `pipe()` and `dup2()` set up its environment, `execvp()` transforms it into the desired program, and `sigaction()` keeps everything under control. The beauty of Unix is that these simple primitives combine to create powerful command-line workflows.
+## What I learned
 
-## Known Limitations
+The hardest part wasn't implementing the features, it was understanding why the Unix abstractions are designed the way they are. File descriptors, process groups, signal inheritance - these aren't arbitrary design choices, they're a coherent model that makes powerful composition possible. Building this shell taught me that Unix isn't just a collection of system calls, it's a carefully designed system where each piece builds on the others.
 
-- No command line editing (arrow keys, tab completion)
-- No job control beyond basic background execution
-- Limited error handling for complex command combinations
-- No support for environment variable expansion
-- Maximum limits on arguments, jobs, and history length
-- No quoting or escaping mechanisms for complex arguments
+## Limitations and future work
 
-## Future Work
-
-- Implement command line editing using readline library
-- Add tab completion for commands and file paths
-- Support environment variable expansion ($VAR)
-- Add job control commands (fg, bg, kill)
-- Implement command substitution with backticks
-- Add support for logical operators (&&, ||)
-- Implement quoting and escape character handling
+No `$PS1` customization - the prompt format is fixed
+No `.tinshrc` configuration file - settings can't be persisted
+No job control beyond basic background/foreground - no `fg` or `bg` commands
+No arithmetic expansion like `$((2+2))`
+No environment variable expansion beyond basic `$HOME`
+No command line editing beyond arrow key navigation
