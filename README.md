@@ -34,7 +34,7 @@ make
 ./tinsh
 ```
 
-Requires clang and a Unix system (tested on macOS).
+Requires clang and a Unix system (tested on macOS). Verified memory-leak free under AddressSanitizer (`clang -fsanitize=address`).
 
 ---
 
