@@ -21,6 +21,7 @@
 #define MAX_PATH_LEN 4096         /* Maximum path length */
 #define MAX_COMPLETIONS 100       /* Maximum number of tab completions */
 #define MAX_COMMAND_GROUPS 32     /* Maximum number of command groups */
+#define MAX_SUBSTITUTION_LEN 2048 /* Maximum length of command substitution output */
 
 /* ANSI color codes */
 #define COLOR_RED     "\033[1;31m"
@@ -91,6 +92,10 @@ void parse_input(char *input, command_t *commands, int *num_commands);
 void add_to_history(const char *command);
 void parse_input_advanced(char *input, command_t *commands, int *num_commands);
 void parse_command_groups(char *input, command_group_t *groups, int *num_groups);
+
+/* Command substitution */
+char *execute_command_substitution(const char *command);
+char *expand_command_substitutions(const char *input);
 
 /* Terminal handling */
 void set_raw_mode(void);

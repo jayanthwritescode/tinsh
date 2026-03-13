@@ -64,12 +64,16 @@ void shell_loop(void) {
         /* Add to history */
         add_to_history(input);
         
-        /* Parse input into command groups */
-        parse_command_groups(input, groups, &num_groups);
+        /* Expand command substitutions */
+        char *expanded_input = expand_command_substitutions(input);
+        
+        /* Parse expanded input into command groups */
+        parse_command_groups(expanded_input, groups, &num_groups);
         
         /* Skip if no command groups found */
         if (num_groups == 0) {
             free(input);
+            free(expanded_input);
             continue;
         }
         
@@ -77,6 +81,7 @@ void shell_loop(void) {
         execute_command_groups(groups, num_groups);
         
         free(input);
+        free(expanded_input);
     }
 }
 
@@ -189,7 +194,7 @@ void parse_input_advanced(char *input, command_t *commands, int *num_commands) {
             /* Toggle single quotes */
             in_single_quotes = !in_single_quotes;
         } else if ((c == ' ' || c == '\t') && !in_quotes && !in_single_quotes) {
-            /* End of argument */
+            /* End of argument - handle word splitting for unquoted substitutions */
             if (arg_pos > 0) {
                 current_arg[arg_pos] = '\0';
                 
@@ -236,13 +241,24 @@ void parse_input_advanced(char *input, command_t *commands, int *num_commands) {
                     commands[*num_commands].pipe_next = false;
                     cmd_arg_index = 0;
                 } else {
-                    /* Regular argument */
-                    commands[*num_commands].args[cmd_arg_index++] = strdup(current_arg);
-                    commands[*num_commands].argc++;
-                    
-                    if (cmd_arg_index >= MAX_ARGS - 1) {
-                        print_error("parse", "too many arguments");
-                        break;
+                    /* Regular argument - word split if unquoted, single token if quoted */
+                    if (!in_quotes && !in_single_quotes && strchr(current_arg, ' ') != NULL) {
+                        /* Word splitting for unquoted substitutions with spaces */
+                        char *word = strtok(current_arg, " \t");
+                        while (word != NULL && cmd_arg_index < MAX_ARGS - 1) {
+                            commands[*num_commands].args[cmd_arg_index++] = strdup(word);
+                            commands[*num_commands].argc++;
+                            word = strtok(NULL, " \t");
+                        }
+                    } else {
+                        /* Single token (quoted or no spaces) */
+                        commands[*num_commands].args[cmd_arg_index++] = strdup(current_arg);
+                        commands[*num_commands].argc++;
+                        
+                        if (cmd_arg_index >= MAX_ARGS - 1) {
+                            print_error("parse", "too many arguments");
+                            break;
+                        }
                     }
                 }
                 
@@ -259,8 +275,19 @@ void parse_input_advanced(char *input, command_t *commands, int *num_commands) {
     /* Handle last argument */
     if (arg_pos > 0) {
         current_arg[arg_pos] = '\0';
-        commands[*num_commands].args[cmd_arg_index++] = strdup(current_arg);
-        commands[*num_commands].argc++;
+        
+        /* Apply word splitting to last argument if needed */
+        if (!in_quotes && !in_single_quotes && strchr(current_arg, ' ') != NULL) {
+            char *word = strtok(current_arg, " \t");
+            while (word != NULL && cmd_arg_index < MAX_ARGS - 1) {
+                commands[*num_commands].args[cmd_arg_index++] = strdup(word);
+                commands[*num_commands].argc++;
+                word = strtok(NULL, " \t");
+            }
+        } else {
+            commands[*num_commands].args[cmd_arg_index++] = strdup(current_arg);
+            commands[*num_commands].argc++;
+        }
     }
     
     /* Null-terminate last command's args */
@@ -1001,4 +1028,184 @@ void handle_tab_completion(char *input, int *cursor_pos) {
     for (int i = 0; i < num_matches; i++) {
         free(matches[i]);
     }
+}
+
+/* Command substitution functions */
+
+/* Execute a command and return its stdout as a string */
+char *execute_command_substitution(const char *command) {
+    int pipefd[2];
+    pid_t pid;
+    char *result = malloc(MAX_SUBSTITUTION_LEN);
+    if (result == NULL) {
+        print_error("malloc", "failed to allocate memory for substitution");
+        return strdup("");
+    }
+    result[0] = '\0';
+    
+    /* Create pipe for capturing output */
+    if (pipe(pipefd) == -1) {
+        print_error("pipe", strerror(errno));
+        free(result);
+        return strdup("");
+    }
+    
+    /* Fork child process */
+    pid = fork();
+    if (pid == -1) {
+        print_error("fork", strerror(errno));
+        close(pipefd[0]);
+        close(pipefd[1]);
+        free(result);
+        return strdup("");
+    } else if (pid == 0) {
+        /* Child process - redirect stdout to pipe */
+        close(pipefd[0]);  /* Close read end */
+        dup2(pipefd[1], STDOUT_FILENO);  /* Redirect stdout to write end */
+        close(pipefd[1]);
+        
+        /* Parse and execute the command using tinsh's own parser */
+        command_group_t groups[MAX_COMMAND_GROUPS];
+        int num_groups;
+        
+        /* Create a copy of the command for parsing */
+        char *command_copy = strdup(command);
+        parse_command_groups(command_copy, groups, &num_groups);
+        
+        /* Execute the command groups */
+        execute_command_groups(groups, num_groups);
+        
+        /* Clean up and exit */
+        for (int i = 0; i < num_groups; i++) {
+            free(groups[i].commands);
+        }
+        free(command_copy);
+        exit(last_exit_code);
+    } else {
+        /* Parent process - read from pipe */
+        close(pipefd[1]);  /* Close write end */
+        
+        char buffer[1024];
+        ssize_t bytes_read;
+        size_t total_read = 0;
+        
+        while ((bytes_read = read(pipefd[0], buffer, sizeof(buffer))) > 0) {
+            if (total_read + bytes_read < MAX_SUBSTITUTION_LEN - 1) {
+                memcpy(result + total_read, buffer, bytes_read);
+                total_read += bytes_read;
+            }
+        }
+        
+        result[total_read] = '\0';
+        close(pipefd[0]);
+        
+        /* Wait for child to complete */
+        int status;
+        waitpid(pid, &status, 0);
+        
+        /* Strip trailing newlines */
+        while (total_read > 0 && (result[total_read - 1] == '\n' || result[total_read - 1] == '\r')) {
+            result[--total_read] = '\0';
+        }
+        
+        return result;
+    }
+}
+
+/* Expand command substitutions in input string */
+char *expand_command_substitutions(const char *input) {
+    char *result = malloc(strlen(input) * 2 + MAX_SUBSTITUTION_LEN);  /* Allocate extra space for expansions */
+    if (result == NULL) {
+        print_error("malloc", "failed to allocate memory for expansion");
+        return strdup(input);
+    }
+    
+    result[0] = '\0';
+    size_t input_pos = 0;
+    size_t result_pos = 0;
+    bool in_substitution = false;
+    char substitution_start = '\0';  /* '$' or '`' */
+    char *substitution_buffer = malloc(MAX_INPUT_LEN);
+    int sub_buffer_pos = 0;
+    
+    while (input[input_pos] != '\0') {
+        if (!in_substitution) {
+            /* Look for start of substitution */
+            if (input[input_pos] == '$' && input[input_pos + 1] == '(') {
+                in_substitution = true;
+                substitution_start = '$';
+                input_pos += 2;  /* Skip "$(" */
+                sub_buffer_pos = 0;
+                substitution_buffer[0] = '\0';
+            } else if (input[input_pos] == '`') {
+                in_substitution = true;
+                substitution_start = '`';
+                input_pos += 1;  /* Skip "`" */
+                sub_buffer_pos = 0;
+                substitution_buffer[0] = '\0';
+            } else {
+                /* Regular character - copy to result */
+                result[result_pos++] = input[input_pos++];
+                result[result_pos] = '\0';
+            }
+        } else {
+            /* Inside substitution - look for end */
+            if (substitution_start == '$' && input[input_pos] == ')' && sub_buffer_pos > 0) {
+                /* End of $(...) substitution */
+                substitution_buffer[sub_buffer_pos] = '\0';
+                
+                /* Recursively expand nested substitutions */
+                char *expanded_inner = expand_command_substitutions(substitution_buffer);
+                
+                /* Execute the command */
+                char *command_output = execute_command_substitution(expanded_inner);
+                
+                /* Append result to output */
+                size_t output_len = strlen(command_output);
+                if (result_pos + output_len < strlen(input) * 2 + MAX_SUBSTITUTION_LEN - 1) {
+                    strcat(result + result_pos, command_output);
+                    result_pos += output_len;
+                }
+                
+                free(expanded_inner);
+                free(command_output);
+                
+                in_substitution = false;
+                input_pos += 1;  /* Skip ")" */
+            } else if (substitution_start == '`' && input[input_pos] == '`' && sub_buffer_pos > 0) {
+                /* End of `...` substitution */
+                substitution_buffer[sub_buffer_pos] = '\0';
+                
+                /* Recursively expand nested substitutions */
+                char *expanded_inner = expand_command_substitutions(substitution_buffer);
+                
+                /* Execute the command */
+                char *command_output = execute_command_substitution(expanded_inner);
+                
+                /* Append result to output */
+                size_t output_len = strlen(command_output);
+                if (result_pos + output_len < strlen(input) * 2 + MAX_SUBSTITUTION_LEN - 1) {
+                    strcat(result + result_pos, command_output);
+                    result_pos += output_len;
+                }
+                
+                free(expanded_inner);
+                free(command_output);
+                
+                in_substitution = false;
+                input_pos += 1;  /* Skip closing "`" */
+            } else {
+                /* Add character to substitution buffer */
+                if (sub_buffer_pos < MAX_INPUT_LEN - 1) {
+                    substitution_buffer[sub_buffer_pos++] = input[input_pos++];
+                    substitution_buffer[sub_buffer_pos] = '\0';
+                } else {
+                    input_pos++;  /* Skip if buffer is full */
+                }
+            }
+        }
+    }
+    
+    free(substitution_buffer);
+    return result;
 }
