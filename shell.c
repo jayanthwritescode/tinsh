@@ -12,21 +12,21 @@ int history_position = -1;
 
 /* Initialize shell state */
 void initialize_shell(void) {
-    /* Clear job table */
-    for (int i = 0; i < MAX_JOBS; i++) {
-        jobs[i].job_id = 0;
-        jobs[i].pid = 0;
-        jobs[i].command[0] = '\0';
-        jobs[i].running = false;
-    }
-    
-    /* Clear history */
-    for (int i = 0; i < MAX_HISTORY; i++) {
-        history[i][0] = '\0';
-    }
+    /* Initialize global variables */
+    next_job_id = 1;
+    history_count = 0;
+    foreground_pid = 0;
+    last_exit_code = 0;
+    history_position = -1;
     
     /* Save original terminal settings */
     tcgetattr(STDIN_FILENO, &orig_termios);
+    
+    /* Setup signal handlers */
+    setup_signal_handlers();
+    
+    /* Execute config file if it exists */
+    execute_config_file(CONFIG_FILE);
     
     /* Setup signal handlers */
     setup_signal_handlers();
@@ -861,6 +861,44 @@ void print_job_completion(int job_id) {
 }
 
 /* Signal handling functions */
+
+/* Execute configuration file */
+void execute_config_file(const char *config_path) {
+    FILE *config = fopen(config_path, "r");
+    if (config == NULL) {
+        return;  /* No config file is fine */
+    }
+    
+    char line[MAX_INPUT_LEN];
+    while (fgets(line, sizeof(line), config) != NULL) {
+        /* Remove trailing newline */
+        line[strcspn(line, "\n")] = '\0';
+        
+        /* Skip empty lines and comments */
+        if (strlen(line) == 0 || line[0] == '#') {
+            continue;
+        }
+        
+        /* Execute each line as if typed by user */
+        printf("tinsh> %s\n", line);
+        
+        /* Parse and execute the config line */
+        command_group_t groups[MAX_COMMAND_GROUPS];
+        int num_groups;
+        
+        /* Expand command substitutions in config line */
+        char *expanded_line = expand_command_substitutions(line);
+        parse_command_groups(expanded_line, groups, &num_groups);
+        
+        if (num_groups > 0) {
+            execute_command_groups(groups, num_groups);
+        }
+        
+        free(expanded_line);
+    }
+    
+    fclose(config);
+}
 
 /* Setup signal handlers */
 void setup_signal_handlers(void) {
