@@ -38,8 +38,8 @@ void initialize_shell(void) {
 /* Main shell REPL loop */
 void shell_loop(void) {
     char *input;
-    command_t commands[MAX_ARGS];  /* Support multiple piped commands */
-    int num_commands;
+    command_group_t groups[MAX_COMMAND_GROUPS];
+    int num_groups;
     
     while (1) {
         /* Check for completed background jobs */
@@ -64,45 +64,86 @@ void shell_loop(void) {
         /* Add to history */
         add_to_history(input);
         
-        /* Parse input into commands */
-        parse_input_advanced(input, commands, &num_commands);
+        /* Parse input into command groups */
+        parse_command_groups(input, groups, &num_groups);
         
-        /* Skip if no commands found */
-        if (num_commands == 0) {
+        /* Skip if no command groups found */
+        if (num_groups == 0) {
             free(input);
             continue;
         }
         
-        /* Check if command is built-in */
-        if (is_builtin(commands[0].args[0])) {
-            /* Built-in commands run in parent process */
-            if (strcmp(commands[0].args[0], "exit") == 0) {
-                builtin_exit(commands[0].args);
-            } else if (strcmp(commands[0].args[0], "cd") == 0) {
-                builtin_cd(commands[0].args);
-            } else if (strcmp(commands[0].args[0], "pwd") == 0) {
-                builtin_pwd(commands[0].args);
-            } else if (strcmp(commands[0].args[0], "history") == 0) {
-                builtin_history(commands[0].args);
-            } else if (strcmp(commands[0].args[0], "jobs") == 0) {
-                builtin_jobs(commands[0].args);
-            }
-        } else {
-            /* External commands */
-            if (num_commands > 1) {
-                /* Execute pipeline */
-                execute_pipeline(commands, num_commands);
-            } else {
-                /* Execute single command */
-                execute_command(&commands[0]);
-            }
-        }
+        /* Execute command groups with logical operators */
+        execute_command_groups(groups, num_groups);
         
         free(input);
     }
 }
 
 /* Read input from user - replaced by enhanced version below */
+
+/* Parse input string into command groups with logical operators */
+void parse_command_groups(char *input, command_group_t *groups, int *num_groups) {
+    *num_groups = 0;
+    char *group_start = input;
+    char *current = input;
+    
+    while (*current != '\0' && *num_groups < MAX_COMMAND_GROUPS) {
+        /* Look for logical operators */
+        if (*current == ';') {
+            /* Found semicolon */
+            *current = '\0';  /* Terminate current group */
+            
+            /* Parse this group into commands */
+            groups[*num_groups].commands = malloc(MAX_ARGS * sizeof(command_t));
+            groups[*num_groups].operator = OP_SEMICOLON;
+            parse_input_advanced(group_start, groups[*num_groups].commands, &groups[*num_groups].num_commands);
+            
+            (*num_groups)++;
+            group_start = current + 1;
+            current = group_start;
+            
+        } else if (*current == '&' && *(current + 1) == '&') {
+            /* Found AND operator */
+            *current = '\0';  /* Terminate current group */
+            *(current + 1) = '\0';
+            
+            /* Parse this group into commands */
+            groups[*num_groups].commands = malloc(MAX_ARGS * sizeof(command_t));
+            groups[*num_groups].operator = OP_AND;
+            parse_input_advanced(group_start, groups[*num_groups].commands, &groups[*num_groups].num_commands);
+            
+            (*num_groups)++;
+            group_start = current + 2;
+            current = group_start;
+            
+        } else if (*current == '|' && *(current + 1) == '|') {
+            /* Found OR operator */
+            *current = '\0';  /* Terminate current group */
+            *(current + 1) = '\0';
+            
+            /* Parse this group into commands */
+            groups[*num_groups].commands = malloc(MAX_ARGS * sizeof(command_t));
+            groups[*num_groups].operator = OP_OR;
+            parse_input_advanced(group_start, groups[*num_groups].commands, &groups[*num_groups].num_commands);
+            
+            (*num_groups)++;
+            group_start = current + 2;
+            current = group_start;
+            
+        } else {
+            current++;
+        }
+    }
+    
+    /* Parse the last group if there's remaining input */
+    if (*num_groups < MAX_COMMAND_GROUPS && strlen(group_start) > 0) {
+        groups[*num_groups].commands = malloc(MAX_ARGS * sizeof(command_t));
+        groups[*num_groups].operator = OP_NONE;
+        parse_input_advanced(group_start, groups[*num_groups].commands, &groups[*num_groups].num_commands);
+        (*num_groups)++;
+    }
+}
 
 /* Parse input string into command structures with quote and escape handling */
 void parse_input_advanced(char *input, command_t *commands, int *num_commands) {
@@ -367,6 +408,68 @@ void execute_pipeline(command_t *commands, int num_commands) {
     }
     
     last_exit_code = pipeline_status;
+}
+
+/* Execute command groups with logical operators */
+void execute_command_groups(command_group_t *groups, int num_groups) {
+    bool should_execute_next = true;
+    
+    for (int i = 0; i < num_groups; i++) {
+        if (!should_execute_next) {
+            /* Skip this group due to previous operator logic */
+            continue;
+        }
+        
+        /* Execute the current command group */
+        if (groups[i].num_commands > 0) {
+            command_t *first_cmd = &groups[i].commands[0];
+            
+            /* Check if this is a built-in command */
+            if (is_builtin(first_cmd->args[0])) {
+                /* Built-in commands run in parent process */
+                if (strcmp(first_cmd->args[0], "exit") == 0) {
+                    builtin_exit(first_cmd->args);
+                } else if (strcmp(first_cmd->args[0], "cd") == 0) {
+                    builtin_cd(first_cmd->args);
+                } else if (strcmp(first_cmd->args[0], "pwd") == 0) {
+                    builtin_pwd(first_cmd->args);
+                } else if (strcmp(first_cmd->args[0], "history") == 0) {
+                    builtin_history(first_cmd->args);
+                } else if (strcmp(first_cmd->args[0], "jobs") == 0) {
+                    builtin_jobs(first_cmd->args);
+                }
+            } else {
+                /* External commands */
+                if (groups[i].num_commands > 1) {
+                    /* Execute pipeline */
+                    execute_pipeline(groups[i].commands, groups[i].num_commands);
+                } else {
+                    /* Execute single command */
+                    execute_command(&groups[i].commands[0]);
+                }
+            }
+        }
+        
+        /* Determine whether to execute the next group based on the operator */
+        if (groups[i].operator == OP_SEMICOLON) {
+            /* Semicolon always executes next */
+            should_execute_next = true;
+        } else if (groups[i].operator == OP_AND) {
+            /* AND executes next only if current succeeded */
+            should_execute_next = (last_exit_code == 0);
+        } else if (groups[i].operator == OP_OR) {
+            /* OR executes next only if current failed */
+            should_execute_next = (last_exit_code != 0);
+        } else {
+            /* No operator (last group) */
+            should_execute_next = false;
+        }
+    }
+    
+    /* Clean up allocated command arrays */
+    for (int i = 0; i < num_groups; i++) {
+        free(groups[i].commands);
+    }
 }
 
 /* Handle I/O redirection for a command */

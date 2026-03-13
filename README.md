@@ -8,6 +8,7 @@ tinsh is a minimal Unix shell implementation written in C that provides the core
 - **Exit code visualization**: Prompt `$` is bold white for success, bold red for failure
 - **Built-in commands**: `cd`, `exit`, `pwd`, `history`, `jobs`
 - **Advanced parsing**: Full support for quoted strings (`"hello world"`, `'single quotes'`) and escaped spaces (`hello\ world`)
+- **Logical operators**: Semicolon (`;`), AND (`&&`), OR (`||`) with proper precedence
 - **I/O redirection**: Support for `<` (input), `>` (output), and `>>` (append)
 - **Pipes**: Chain multiple commands with `|` operator
 - **Signal handling**: Proper handling of Ctrl+C and Ctrl+Z without killing the shell
@@ -44,6 +45,16 @@ ps aux | grep tinsh
 # Background jobs
 sleep 10 &
 find / -name "*.txt" > results.txt &
+
+# Logical operators
+true && echo "this will print"
+false && echo "this won't print"
+false || echo "this will print"
+true || echo "this won't print"
+
+# Complex chains with precedence
+cmd1 && cmd2 || cmd3; cmd4
+ls /nonexistent && echo "found" || echo "not found"; pwd
 
 # Arrow key navigation (use up/down arrows to browse history)
 # Tab completion (press Tab to complete commands and files)

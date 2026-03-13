@@ -20,6 +20,7 @@
 #define MAX_HISTORY 20            /* Number of commands to keep in history */
 #define MAX_PATH_LEN 4096         /* Maximum path length */
 #define MAX_COMPLETIONS 100       /* Maximum number of tab completions */
+#define MAX_COMMAND_GROUPS 32     /* Maximum number of command groups */
 
 /* ANSI color codes */
 #define COLOR_RED     "\033[1;31m"
@@ -32,6 +33,14 @@
 #define BACKSPACE     127
 #define TAB           9
 #define ENTER         13
+
+/* Logical operators for command groups */
+typedef enum {
+    OP_NONE,        /* No operator (last command) */
+    OP_SEMICOLON,   /* ; - always execute next */
+    OP_AND,         /* && - execute next if current succeeds */
+    OP_OR           /* || - execute next if current fails */
+} operator_t;
 
 /* Job structure for background processes */
 typedef struct {
@@ -51,6 +60,13 @@ typedef struct {
     bool background;             /* Run in background */
     bool pipe_next;              /* Whether command pipes to next */
 } command_t;
+
+/* Command group structure for logical operators */
+typedef struct {
+    command_t *commands;         /* Array of commands (for pipelines) */
+    int num_commands;            /* Number of commands in pipeline */
+    operator_t operator;         /* Operator that follows this group */
+} command_group_t;
 
 /* Global variables */
 extern job_t jobs[MAX_JOBS];
@@ -74,6 +90,7 @@ char *read_input(void);
 void parse_input(char *input, command_t *commands, int *num_commands);
 void add_to_history(const char *command);
 void parse_input_advanced(char *input, command_t *commands, int *num_commands);
+void parse_command_groups(char *input, command_group_t *groups, int *num_groups);
 
 /* Terminal handling */
 void set_raw_mode(void);
@@ -90,6 +107,7 @@ void handle_tab_completion(char *input, int *cursor_pos);
 void execute_command(command_t *cmd);
 void execute_pipeline(command_t *commands, int num_commands);
 void redirect_io(command_t *cmd);
+void execute_command_groups(command_group_t *groups, int num_groups);
 
 /* Built-in commands */
 int builtin_cd(char **args);
