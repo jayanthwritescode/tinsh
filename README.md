@@ -76,7 +76,7 @@ echo "$(echo "a b c")"  # One argument
 
 ```bash
 # Clone and build
-git clone https://github.com/yourusername/tinsh.git
+git clone https://github.com/jayanthwritescode/tinsh.git
 cd tinsh
 make
 
